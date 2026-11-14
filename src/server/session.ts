@@ -4,32 +4,58 @@ import { cookies } from "next/headers";
 export const SESSION_COOKIE_NAME = "veloce_session";
 export const CART_COOKIE_NAME = "veloce_cart_id";
 
-const SESSION_SECRET =
-  process.env.SESSION_SECRET ?? "veloce-commerce-dev-secret-change-in-production";
+/** 7 days in milliseconds — enforced on both the cookie Max-Age and server-side verification. */
+export const SESSION_MAX_AGE_MS = 1000 * 60 * 60 * 24 * 7;
+const MAX_CLOCK_SKEW_MS = 1000 * 60; // 1 minute
 
-interface SessionPayload {
+const DEV_FALLBACK_SECRET = "veloce-local-dev-secret-do-not-use-in-prod";
+
+export interface SessionPayload {
   userId: string;
   iat: number;
 }
 
-function signPayload(encoded: string): string {
-  return crypto.createHmac("sha256", SESSION_SECRET).update(encoded).digest("base64url");
+/**
+ * Resolves the HMAC signing secret lazily at request time.
+ * In production, refuses to run with a hardcoded default secret.
+ */
+export function getSessionSecret(): string {
+  const configured = process.env.SESSION_SECRET?.trim();
+  if (configured && configured.length >= 16) {
+    return configured;
+  }
+
+  if (process.env.NODE_ENV === "production") {
+    throw new Error(
+      "SESSION_SECRET environment variable must be set (minimum 16 characters) in production."
+    );
+  }
+
+  return DEV_FALLBACK_SECRET;
 }
 
-export function createSessionToken(userId: string): string {
+function signPayload(encoded: string): string {
+  return crypto.createHmac("sha256", getSessionSecret()).update(encoded).digest("base64url");
+}
+
+export function createSessionToken(userId: string, now = Date.now()): string {
   const payload: SessionPayload = {
     userId,
-    iat: Date.now(),
+    iat: now,
   };
   const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
   const signature = signPayload(encoded);
   return `${encoded}.${signature}`;
 }
 
-export function verifySessionToken(token: string | undefined): SessionPayload | null {
+export function verifySessionToken(
+  token: string | undefined,
+  now = Date.now()
+): SessionPayload | null {
   if (!token) return null;
   const parts = token.split(".");
   if (parts.length !== 2) return null;
+
   const [encoded, providedSig] = parts;
   if (!encoded || !providedSig) return null;
 
@@ -48,10 +74,17 @@ export function verifySessionToken(token: string | undefined): SessionPayload | 
     const parsed = JSON.parse(
       Buffer.from(encoded, "base64url").toString("utf8")
     ) as Partial<SessionPayload>;
-    if (typeof parsed.userId === "string" && typeof parsed.iat === "number") {
-      return { userId: parsed.userId, iat: parsed.iat };
+
+    if (typeof parsed.userId !== "string" || typeof parsed.iat !== "number") {
+      return null;
     }
-    return null;
+
+    // Reject expired tokens and tokens minted implausibly far in the future
+    if (now - parsed.iat > SESSION_MAX_AGE_MS || parsed.iat > now + MAX_CLOCK_SKEW_MS) {
+      return null;
+    }
+
+    return { userId: parsed.userId, iat: parsed.iat };
   } catch {
     return null;
   }
