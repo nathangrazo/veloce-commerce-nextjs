@@ -111,8 +111,14 @@ export function SettingsView() {
       await Promise.all([syncCart(), refreshSession()]);
       notify({
         tone: "info",
-        title: "Demo environment reset",
-        description: "Cart, orders, profile defaults, and browsing history were cleared.",
+        title: "Account demo data reset",
+        description: "Your cart, orders, profile defaults, and browsing history were cleared.",
+      });
+    } catch {
+      notify({
+        tone: "error",
+        title: "Sign in required",
+        description: "Only signed-in users can reset their own demo data.",
       });
     } finally {
       setResetting(false);
@@ -135,8 +141,9 @@ export function SettingsView() {
             <div>
               <h2 className="text-base font-semibold text-foreground">Appearance</h2>
               <p className="text-xs text-muted">
-                Powered by <code className="font-mono">ThemeContext</code> with{" "}
-                <code className="font-mono">localStorage</code> persistence and FOUC prevention.
+                Managed by <code className="font-mono">ThemeContext</code> via{" "}
+                <code className="font-mono">useSyncExternalStore</code> and{" "}
+                <code className="font-mono">localStorage</code>.
               </p>
             </div>
             <span className="rounded-full bg-surface-subtle px-3 py-1 font-mono text-xs text-muted">
@@ -257,15 +264,21 @@ export function SettingsView() {
         <section className="rounded-2xl border border-border bg-surface p-6">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div>
-              <h2 className="text-base font-semibold text-foreground">Demo Sandbox</h2>
+              <h2 className="text-base font-semibold text-foreground">Account Reset</h2>
               <p className="mt-1 text-xs text-muted">
-                Reset cart items, order history, recently viewed products, and default profile.
+                {status === "authenticated"
+                  ? "Reset your cart, order history, recently viewed products, and default profile."
+                  : "Sign in to reset your account cart, orders, and profile defaults."}
               </p>
             </div>
 
-            <Button variant="secondary" onClick={() => void handleResetDemo()} disabled={resetting}>
+            <Button
+              variant="secondary"
+              onClick={() => void handleResetDemo()}
+              disabled={resetting || status !== "authenticated"}
+            >
               <RotateCcw className="h-4 w-4" />
-              <span>{resetting ? "Resetting..." : "Reset Demo Data"}</span>
+              <span>{resetting ? "Resetting..." : "Reset My Data"}</span>
             </Button>
           </div>
         </section>
