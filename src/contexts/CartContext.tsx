@@ -37,7 +37,7 @@ export type CartAction =
   | { type: "OPTIMISTIC_REMOVE"; productId: string }
   | { type: "OPTIMISTIC_CLEAR" }
   | { type: "SYNC_SUCCESS"; items: CartItem[] }
-  | { type: "ROLLBACK"; previousItems: CartItem[] }
+  | { type: "SYNC_FAILED" }
   | { type: "SET_COUPON"; couponCode: CouponCode | null }
   | { type: "SET_DRAWER_OPEN"; open: boolean };
 
@@ -51,7 +51,6 @@ export const INITIAL_CART_STATE: CartReducerState = {
 
 /**
  * Pure reducer governing all shopping cart transitions.
- * Exported directly for deterministic unit testing.
  */
 export function cartReducer(state: CartReducerState, action: CartAction): CartReducerState {
   switch (action.type) {
@@ -121,10 +120,9 @@ export function cartReducer(state: CartReducerState, action: CartAction): CartRe
         isHydrated: true,
       };
 
-    case "ROLLBACK":
+    case "SYNC_FAILED":
       return {
         ...state,
-        items: action.previousItems,
         isSyncing: false,
       };
 
@@ -156,7 +154,11 @@ interface CartStateContextValue {
 }
 
 interface CartActionsContextValue {
-  addItem: (product: Product, quantity?: number, options?: { openDrawer?: boolean }) => Promise<void>;
+  addItem: (
+    product: Product,
+    quantity?: number,
+    options?: { openDrawer?: boolean }
+  ) => Promise<void>;
   updateQuantity: (productId: string, quantity: number) => Promise<void>;
   removeItem: (productId: string) => Promise<void>;
   clearCart: () => Promise<void>;
@@ -169,8 +171,8 @@ interface CartActionsContextValue {
 
 /**
  * Split State & Actions Contexts:
- * Components that only dispatch mutations (e.g. every ProductCard in a large grid)
- * subscribe exclusively to `CartActionsContext` and never re-render when cart totals change.
+ * Components that only trigger mutations (like ProductCard) subscribe exclusively
+ * to `CartActionsContext` and avoid re-rendering when cart items or totals change.
  */
 const CartStateContext = createContext<CartStateContextValue | null>(null);
 const CartActionsContext = createContext<CartActionsContextValue | null>(null);
@@ -185,27 +187,81 @@ export function CartProvider({ products, children }: CartProviderProps) {
   const { user, status: authStatus } = useAuth();
   const { notify } = useToast();
 
-  // Keep a ref to latest items so optimistic rollbacks remain stable without recreating action callbacks
-  const itemsRef = useRef<CartItem[]>(state.items);
-  useEffect(() => {
-    itemsRef.current = state.items;
-  }, [state.items]);
+  // Serialized FIFO request queue + monotonic revision counter.
+  // Prevents out-of-order responses or a failed earlier request from rolling back
+  // a newer mutation that succeeded.
+  const revisionRef = useRef(0);
+  const queueRef = useRef<Promise<void>>(Promise.resolve());
 
   const productMap = useMemo(
     () => new Map(products.map((product) => [product.id, product])),
     [products]
   );
 
+  const enqueueMutation = useCallback(
+    (
+      optimisticAction: CartAction,
+      requestFn: () => Promise<CartItem[]>,
+      callbacks?: {
+        onSuccess?: () => void;
+        onError?: () => void;
+      }
+    ): Promise<void> => {
+      const revision = ++revisionRef.current;
+      dispatch(optimisticAction);
+
+      const task = queueRef.current.then(async () => {
+        try {
+          const serverItems = await requestFn();
+          callbacks?.onSuccess?.();
+
+          // Only commit server snapshot if no newer optimistic mutation is already queued
+          if (revision === revisionRef.current) {
+            dispatch({ type: "SYNC_SUCCESS", items: serverItems });
+          }
+        } catch {
+          callbacks?.onError?.();
+
+          // Reconcile against authoritative server state only when the queue drains.
+          // If a newer mutation is already queued behind this failure, let it run and
+          // establish the final state rather than clobbering it with a stale snapshot.
+          if (revision === revisionRef.current) {
+            try {
+              const authoritativeItems = await cartService.fetchCart();
+              if (revision === revisionRef.current) {
+                dispatch({ type: "SYNC_SUCCESS", items: authoritativeItems });
+              }
+            } catch {
+              dispatch({ type: "SYNC_FAILED" });
+            }
+          }
+        }
+      });
+
+      queueRef.current = task.catch(() => {
+        // Keep the mutation queue alive after unexpected errors
+      });
+
+      return task;
+    },
+    []
+  );
+
   const syncCart = useCallback(async () => {
+    const revision = ++revisionRef.current;
     try {
       const serverItems = await cartService.fetchCart();
-      dispatch({ type: "HYDRATE", items: serverItems });
+      if (revision === revisionRef.current) {
+        dispatch({ type: "HYDRATE", items: serverItems });
+      }
     } catch {
-      dispatch({ type: "HYDRATE", items: [] });
+      if (revision === revisionRef.current) {
+        dispatch({ type: "HYDRATE", items: [] });
+      }
     }
   }, []);
 
-  // Re-hydrate cart on initial mount and whenever authentication identity changes (guest -> user merge)
+  // Re-hydrate cart on initial mount and whenever authentication identity changes
   useEffect(() => {
     if (authStatus === "loading") return;
     void syncCart();
@@ -213,110 +269,107 @@ export function CartProvider({ products, children }: CartProviderProps) {
 
   const addItem = useCallback(
     async (product: Product, quantity = 1, options?: { openDrawer?: boolean }) => {
-      const snapshot = itemsRef.current;
-      dispatch({
-        type: "OPTIMISTIC_ADD",
-        productId: product.id,
-        quantity,
-        maxStock: product.stock,
-      });
-
       if (options?.openDrawer) {
         dispatch({ type: "SET_DRAWER_OPEN", open: true });
       }
 
-      try {
-        const serverItems = await cartService.addItem(product.id, quantity);
-        dispatch({ type: "SYNC_SUCCESS", items: serverItems });
-        notify({
-          tone: "success",
-          title: "Added to bag",
-          description: `${product.name} (${quantity}) is ready in your cart.`,
-        });
-      } catch {
-        dispatch({ type: "ROLLBACK", previousItems: snapshot });
-        notify({
-          tone: "error",
-          title: "Could not add item",
-          description: "Your cart was restored to its previous state.",
-        });
-      }
+      await enqueueMutation(
+        {
+          type: "OPTIMISTIC_ADD",
+          productId: product.id,
+          quantity,
+          maxStock: product.stock,
+        },
+        () => cartService.addItem(product.id, quantity),
+        {
+          onSuccess: () => {
+            notify({
+              tone: "success",
+              title: "Added to bag",
+              description: `${product.name} (${quantity}) is ready in your cart.`,
+            });
+          },
+          onError: () => {
+            notify({
+              tone: "error",
+              title: "Could not add item",
+              description: "Syncing your cart with the server.",
+            });
+          },
+        }
+      );
     },
-    [notify]
+    [enqueueMutation, notify]
   );
 
   const updateQuantity = useCallback(
     async (productId: string, quantity: number) => {
-      const snapshot = itemsRef.current;
       const product = productMap.get(productId);
       const maxStock = product?.stock ?? 20;
 
-      dispatch({
-        type: "OPTIMISTIC_UPDATE",
-        productId,
-        quantity,
-        maxStock,
-      });
-
-      try {
-        const serverItems = await cartService.updateQuantity(productId, quantity);
-        dispatch({ type: "SYNC_SUCCESS", items: serverItems });
-      } catch {
-        dispatch({ type: "ROLLBACK", previousItems: snapshot });
-        notify({
-          tone: "error",
-          title: "Update failed",
-          description: "Unable to sync quantity. Changes were reverted.",
-        });
-      }
+      await enqueueMutation(
+        {
+          type: "OPTIMISTIC_UPDATE",
+          productId,
+          quantity,
+          maxStock,
+        },
+        () => cartService.updateQuantity(productId, quantity),
+        {
+          onError: () => {
+            notify({
+              tone: "error",
+              title: "Update failed",
+              description: "Could not sync quantity. Reconciled with server state.",
+            });
+          },
+        }
+      );
     },
-    [notify, productMap]
+    [enqueueMutation, notify, productMap]
   );
 
   const removeItem = useCallback(
     async (productId: string) => {
-      const snapshot = itemsRef.current;
       const product = productMap.get(productId);
-      dispatch({ type: "OPTIMISTIC_REMOVE", productId });
 
-      try {
-        const serverItems = await cartService.removeItem(productId);
-        dispatch({ type: "SYNC_SUCCESS", items: serverItems });
-        if (product) {
-          notify({
-            tone: "info",
-            title: "Removed from bag",
-            description: product.name,
-          });
+      await enqueueMutation(
+        { type: "OPTIMISTIC_REMOVE", productId },
+        () => cartService.removeItem(productId),
+        {
+          onSuccess: () => {
+            if (product) {
+              notify({
+                tone: "info",
+                title: "Removed from bag",
+                description: product.name,
+              });
+            }
+          },
+          onError: () => {
+            notify({
+              tone: "error",
+              title: "Removal failed",
+              description: "Unable to remove item right now.",
+            });
+          },
         }
-      } catch {
-        dispatch({ type: "ROLLBACK", previousItems: snapshot });
-        notify({
-          tone: "error",
-          title: "Removal failed",
-          description: "Unable to remove item right now.",
-        });
-      }
+      );
     },
-    [notify, productMap]
+    [enqueueMutation, notify, productMap]
   );
 
   const clearCart = useCallback(async () => {
-    const snapshot = itemsRef.current;
-    dispatch({ type: "OPTIMISTIC_CLEAR" });
-
-    try {
-      const serverItems = await cartService.clearCart();
-      dispatch({ type: "SYNC_SUCCESS", items: serverItems });
-    } catch {
-      dispatch({ type: "ROLLBACK", previousItems: snapshot });
-      notify({
-        tone: "error",
-        title: "Could not clear cart",
-        description: "Please try again.",
-      });
-    }
-  }, [notify]);
+    await enqueueMutation({ type: "OPTIMISTIC_CLEAR" }, () => cartService.clearCart(), {
+      onError: () => {
+        notify({
+          tone: "error",
+          title: "Could not clear cart",
+          description: "Please try again.",
+        });
+      },
+    });
+  }, [enqueueMutation, notify]);
 
   const applyCoupon = useCallback(
     (rawCode: string): { ok: boolean; message: string } => {
