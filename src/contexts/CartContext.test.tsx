@@ -14,7 +14,7 @@ import type { Product } from "@/domain/types";
 import { authService } from "@/services/auth.service";
 import { cartService } from "@/services/cart.service";
 
-const sampleProduct: Product = {
+const sneakers: Product = {
   id: "prod_aero_runner",
   slug: "aero-knit-runner",
   name: "Aero Knit Runner",
@@ -29,13 +29,28 @@ const sampleProduct: Product = {
   specs: [],
 };
 
+const lamp: Product = {
+  id: "prod_lumen_lamp",
+  slug: "lumen-cantilever-lamp",
+  name: "Lumen Desk Lamp",
+  subtitle: "Anodized aluminum",
+  description: "Test lamp",
+  priceCents: 16500,
+  category: "Workspace",
+  image: "/images/products/lamp.jpg",
+  rating: 4.7,
+  reviewCount: 78,
+  stock: 5,
+  specs: [],
+};
+
 describe("cartReducer", () => {
   it("optimistically adds a new item and clamps quantity to available stock", () => {
     const added = cartReducer(INITIAL_CART_STATE, {
       type: "OPTIMISTIC_ADD",
-      productId: sampleProduct.id,
+      productId: sneakers.id,
       quantity: 2,
-      maxStock: sampleProduct.stock,
+      maxStock: sneakers.stock,
     });
     expect(added.items).toHaveLength(1);
     expect(added.items[0]?.quantity).toBe(2);
@@ -43,9 +58,9 @@ describe("cartReducer", () => {
 
     const clamped = cartReducer(added, {
       type: "OPTIMISTIC_ADD",
-      productId: sampleProduct.id,
+      productId: sneakers.id,
       quantity: 5,
-      maxStock: sampleProduct.stock,
+      maxStock: sneakers.stock,
     });
     expect(clamped.items[0]?.quantity).toBe(3);
   });
@@ -53,50 +68,49 @@ describe("cartReducer", () => {
   it("removes an item when quantity is updated to zero", () => {
     const seeded = cartReducer(INITIAL_CART_STATE, {
       type: "OPTIMISTIC_ADD",
-      productId: sampleProduct.id,
+      productId: sneakers.id,
       quantity: 1,
       maxStock: 5,
     });
     const cleared = cartReducer(seeded, {
       type: "OPTIMISTIC_UPDATE",
-      productId: sampleProduct.id,
+      productId: sneakers.id,
       quantity: 0,
       maxStock: 5,
     });
     expect(cleared.items).toHaveLength(0);
   });
 
-  it("restores previous items on ROLLBACK", () => {
-    const previous = [{ productId: sampleProduct.id, quantity: 1, addedAt: "2026-01-01" }];
-    const rolledBack = cartReducer(
-      { ...INITIAL_CART_STATE, items: [], isSyncing: true },
-      { type: "ROLLBACK", previousItems: previous }
+  it("clears syncing flag on SYNC_FAILED without corrupting state", () => {
+    const next = cartReducer(
+      { ...INITIAL_CART_STATE, isSyncing: true },
+      { type: "SYNC_FAILED" }
     );
-    expect(rolledBack.items).toEqual(previous);
-    expect(rolledBack.isSyncing).toBe(false);
+    expect(next.isSyncing).toBe(false);
   });
 });
 
 function CartHarness() {
   const { pricing, hydratedItems } = useCartState();
-  const { addItem, applyCoupon } = useCartActions();
+  const { addItem } = useCartActions();
 
   return (
     <div>
       <span data-testid="count">{pricing.itemCount}</span>
-      <span data-testid="total">{pricing.totalCents}</span>
-      <span data-testid="lines">{hydratedItems.length}</span>
-      <button type="button" onClick={() => void addItem(sampleProduct, 1)}>
-        Add Item
+      <span data-testid="product-ids">
+        {hydratedItems.map((entry) => entry.product.id).join(",")}
+      </span>
+      <button type="button" onClick={() => void addItem(sneakers, 1)}>
+        Add Sneakers
       </button>
-      <button type="button" onClick={() => applyCoupon("WELCOME10")}>
-        Apply Coupon
+      <button type="button" onClick={() => void addItem(lamp, 1)}>
+        Add Lamp
       </button>
     </div>
   );
 }
 
-describe("CartProvider optimistic updates & rollback", () => {
+describe("CartProvider queued optimistic updates", () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     vi.spyOn(authService, "getSession").mockResolvedValue(null);
@@ -106,45 +120,84 @@ describe("CartProvider optimistic updates & rollback", () => {
   it("adds items optimistically and reconciles with server response", async () => {
     const user = userEvent.setup();
     vi.spyOn(cartService, "addItem").mockResolvedValue([
-      { productId: sampleProduct.id, quantity: 1, addedAt: "2026-01-01" },
+      { productId: sneakers.id, quantity: 1, addedAt: "2026-01-01" },
     ]);
 
     render(
       <ToastProvider>
         <AuthProvider>
-          <CartProvider products={[sampleProduct]}>
+          <CartProvider products={[sneakers, lamp]}>
             <CartHarness />
           </CartProvider>
         </AuthProvider>
       </ToastProvider>
     );
 
-    await user.click(screen.getByRole("button", { name: "Add Item" }));
+    await user.click(screen.getByRole("button", { name: "Add Sneakers" }));
 
     await waitFor(() => {
       expect(screen.getByTestId("count")).toHaveTextContent("1");
-      expect(screen.getByTestId("lines")).toHaveTextContent("1");
+      expect(screen.getByTestId("product-ids")).toHaveTextContent(sneakers.id);
     });
   });
 
-  it("rolls back optimistic state when the API call rejects", async () => {
+  it("reconciles with server truth when a standalone mutation fails", async () => {
     const user = userEvent.setup();
     vi.spyOn(cartService, "addItem").mockRejectedValue(new Error("Network error"));
+    const fetchSpy = vi.spyOn(cartService, "fetchCart").mockResolvedValue([]);
 
     render(
       <ToastProvider>
         <AuthProvider>
-          <CartProvider products={[sampleProduct]}>
+          <CartProvider products={[sneakers, lamp]}>
             <CartHarness />
           </CartProvider>
         </AuthProvider>
       </ToastProvider>
     );
 
-    await user.click(screen.getByRole("button", { name: "Add Item" }));
+    await user.click(screen.getByRole("button", { name: "Add Sneakers" }));
 
     await waitFor(() => {
       expect(screen.getByTestId("count")).toHaveTextContent("0");
+      expect(fetchSpy).toHaveBeenCalled();
+    });
+  });
+
+  it("does not clobber a newer successful mutation when an earlier queued mutation fails", async () => {
+    const user = userEvent.setup();
+
+    let rejectFirst!: (reason?: unknown) => void;
+    const firstPromise = new Promise<never>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+
+    const addSpy = vi
+      .spyOn(cartService, "addItem")
+      .mockReturnValueOnce(firstPromise)
+      .mockResolvedValueOnce([{ productId: lamp.id, quantity: 1, addedAt: "2026-01-01" }]);
+
+    render(
+      <ToastProvider>
+        <AuthProvider>
+          <CartProvider products={[sneakers, lamp]}>
+            <CartHarness />
+          </CartProvider>
+        </AuthProvider>
+      </ToastProvider>
+    );
+
+    // Fire two rapid consecutive mutations
+    await user.click(screen.getByRole("button", { name: "Add Sneakers" }));
+    await user.click(screen.getByRole("button", { name: "Add Lamp" }));
+
+    // Reject the first request after the second has already been queued
+    rejectFirst(new Error("Transient 503 on first item"));
+
+    await waitFor(() => {
+      expect(addSpy).toHaveBeenCalledTimes(2);
+      expect(screen.getByTestId("count")).toHaveTextContent("1");
+      expect(screen.getByTestId("product-ids")).toHaveTextContent(lamp.id);
     });
   });
 });
