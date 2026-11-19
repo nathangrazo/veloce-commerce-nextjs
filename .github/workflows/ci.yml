@@ -8,7 +8,7 @@ on:
 
 jobs:
   verify:
-    name: Typecheck, Lint, Test & Build
+    name: Typecheck, Lint, Unit Tests, Build & E2E
     runs-on: ubuntu-latest
 
     steps:
@@ -30,8 +30,14 @@ jobs:
       - name: ESLint check
         run: npm run lint
 
-      - name: Run unit & integration tests
+      - name: Run unit & API route tests
         run: npm test
 
       - name: Production build
         run: npm run build
+
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run Playwright E2E tests
+        run: npm run test:e2e
