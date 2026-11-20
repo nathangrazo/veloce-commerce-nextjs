@@ -1,6 +1,6 @@
 # Veloce Commerce
 
-[![CI](https://github.com/nathangrazo/teste/actions/workflows/ci.yml/badge.svg)](https://github.com/nathangrazo/teste/actions/workflows/ci.yml)
+[![CI](https://github.com/nathangrazo/veloce-commerce-nextjs/actions/workflows/ci.yml/badge.svg)](https://github.com/nathangrazo/veloce-commerce-nextjs/actions/workflows/ci.yml)
 
 A full-stack e-commerce app built with **Next.js 16 (App Router)**, **React 19**, **TypeScript**, and **Tailwind CSS 4**.
 
@@ -69,8 +69,8 @@ This is a **production-minded portfolio project**, not a real storefront taking 
 Requires **Node.js 20+** and **npm 10+**.
 
 ```bash
-git clone https://github.com/nathangrazo/teste.git veloce-commerce
-cd veloce-commerce
+git clone https://github.com/nathangrazo/veloce-commerce-nextjs.git
+cd veloce-commerce-nextjs
 npm install
 cp .env.example .env.local
 npm run dev
