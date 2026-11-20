@@ -24,7 +24,7 @@ export function writeStorage<T>(key: string, value: T): void {
   try {
     window.localStorage.setItem(key, JSON.stringify(value));
   } catch {
-    // Ignore quota exceeded / private browsing write errors gracefully
+    // Ignore quota exceeded or restricted storage errors in private browsing
   }
 }
 

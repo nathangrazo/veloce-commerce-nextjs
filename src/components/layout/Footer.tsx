@@ -9,8 +9,8 @@ export function Footer() {
             VELOCE COMMERCE
           </p>
           <p className="mt-1 text-xs text-muted">
-            Next.js App Router + React Context API architecture showcase with optimistic
-            cart state, signed sessions, and Zod-validated API routes.
+            Next.js App Router e-commerce study with split React Context state, queued
+            optimistic updates, HMAC-signed sessions, and Zod-validated API routes.
           </p>
         </div>
 

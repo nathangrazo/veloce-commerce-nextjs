@@ -75,8 +75,7 @@ export function StorefrontClient({ products }: StorefrontClientProps) {
           </h1>
 
           <p className="mt-4 max-w-xl text-sm leading-relaxed text-muted sm:text-base">
-            Curated furniture, acoustic hardware, and everyday apparel crafted for longevity.
-            Use code{" "}
+            Furniture, audio hardware, and everyday apparel built for daily use. Use code{" "}
             <span className="rounded-md bg-surface-subtle px-1.5 py-0.5 font-mono text-xs font-semibold text-foreground">
               WELCOME10
             </span>{" "}

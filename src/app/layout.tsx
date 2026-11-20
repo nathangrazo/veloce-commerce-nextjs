@@ -26,12 +26,11 @@ export const metadata: Metadata = {
     template: "%s | Veloce Commerce",
   },
   description:
-    "Production-grade Next.js App Router e-commerce platform showcasing scalable React Context API state management, optimistic UI updates, signed sessions, and clean architecture.",
+    "Full-stack Next.js App Router e-commerce app demonstrating split React Context API state management, queued optimistic cart updates, HMAC-signed sessions, and automated testing.",
 };
 
 /**
- * Inline FOUC-prevention script: applies persisted dark/light class
- * synchronously before first paint so theme never flickers on refresh.
+ * Applies the stored dark/light class before first paint so dark mode does not flash on reload.
  */
 const THEME_INIT_SCRIPT = `
 (function() {
