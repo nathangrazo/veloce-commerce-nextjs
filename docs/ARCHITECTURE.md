@@ -1,63 +1,56 @@
-# Architecture & Engineering Decisions
+# Architecture Notes
 
-This document captures the architectural patterns and trade-offs behind **Veloce Commerce**, designed to demonstrate maintainable, production-grade React & Next.js engineering.
+This document outlines the main structural decisions in **Veloce Commerce**, why they were made, and where the intentional shortcuts are.
 
-## 1. Layered Feature Architecture
+## 1. Directory Boundaries
 
-```
+```text
 src/
-├── app/          # Thin Next.js App Router pages (Server Components) + REST Route Handlers
-├── features/     # Domain-aligned UI modules (catalog, cart, checkout, auth, orders, settings)
+├── app/          # Thin Next.js App Router pages + REST Route Handlers
+├── features/     # Domain-scoped client views (catalog, cart, checkout, auth, orders, settings)
 ├── contexts/     # Global client state via React Context API + useReducer
-├── components/   # Reusable design-system primitives & layout shell
-├── domain/       # Pure TypeScript models, Zod validation schemas, and pricing rules
-├── services/     # Typed HTTP client layer decoupling React from fetch details
-├── server/       # Server-only persistence repository, catalog seed, and HMAC session crypto
-└── lib/          # Shared SSR-safe utilities (storage, currency formatting, class merging)
+├── components/   # Generic UI controls (Button, Input, Badge, Toaster) + Navbar/Footer
+├── domain/       # Pure TypeScript models, Zod schemas, and pricing rules
+├── services/     # Typed HTTP client layer
+├── server/       # Server-only code: catalog seed, HMAC session crypto, persistence drivers
+└── lib/          # Shared helpers (Zod-validated localStorage, Intl formatting, cn)
 ```
 
-**Why this separation?**
-- **Pure domain rules (`src/domain/pricing.ts`)** are shared verbatim between the client cart preview and the `POST /api/orders` handler, guaranteeing zero pricing drift and making business logic trivially unit-testable without DOM or network mocks.
-- **Route files (`src/app/**/page.tsx`)** stay thin, focusing on SEO metadata, `generateStaticParams`, and server-side data loading.
+Keeping `src/domain/pricing.ts` free of React and Node imports lets both the client cart preview and `POST /api/orders` call the exact same calculation logic.
 
 ---
 
-## 2. Scalable React Context API Patterns
+## 2. React Context API Design
 
-A naive single global Context causes every consumer in the tree to re-render on any state change. Veloce solves this through four deliberate patterns:
+### Split State & Actions (`CartContext`)
+Putting state and dispatch functions in one Context value forces every consumer to re-render whenever state changes. `CartProvider` separates them into `CartStateContext` and `CartActionsContext`.
 
-### A. Split State & Dispatch Contexts (`CartContext`)
-`CartProvider` exposes two separate contexts:
-- `CartStateContext` — read-only cart items, derived `PricingBreakdown`, and drawer state.
-- `CartActionsContext` — stable `useCallback` mutations (`addItem`, `updateQuantity`, `removeItem`, `applyCoupon`, etc.).
+Because `ProductCard` only reads `useCartActions()`, adding an item updates the navbar badge and drawer without re-rendering the rest of the catalog grid.
 
-Components like `ProductCard` subscribe **only** to `useCartActions()`. Adding an item to the cart updates the navbar badge and drawer without re-rendering every product card in the catalog grid.
+### Queued Optimistic Updates & Concurrency Safety
+Early versions of optimistic carts often snapshot `items` before a `fetch()` and roll back to that snapshot in `catch`. That breaks under rapid user interaction: if request A fails after request B has already succeeded, A's rollback overwrites B's state with an outdated snapshot.
 
-### B. Deterministic `useReducer` + Optimistic Updates with Rollback
-All cart mutations flow through a pure `cartReducer`:
-1. Snapshot current `items` via a ref (preventing action callback identity churn).
-2. Dispatch `OPTIMISTIC_*` immediately for instant UI responsiveness.
-3. Persist asynchronously via `/api/cart`.
-4. Reconcile with authoritative server response (`SYNC_SUCCESS`), or dispatch `ROLLBACK` + error toast on failure.
+`CartProvider` avoids this in two steps:
+1. All cart API calls run sequentially through a FIFO promise queue (`queueRef`), preventing out-of-order server writes.
+2. Each optimistic dispatch increments a monotonic counter (`revisionRef`). A response only updates reducer state if its revision still matches the latest queued mutation. If a request fails while newer mutations are pending, it lets the newer mutation finish; if it was the last item in the queue, it fetches authoritative state via `GET /api/cart`.
 
-### C. Explicit Provider Composition (`AppProviders`)
-Providers are ordered strictly by dependency flow:
-`ThemeProvider → ToastProvider → AuthProvider → CartProvider → RecentlyViewedProvider`.
-
-### D. Fail-Fast Custom Hooks
-Every context exports a strict hook (`useCartState`, `useCartActions`, `useAuth`, `useTheme`, `useRecentlyViewed`, `useToast`) that throws a descriptive error if invoked outside its provider boundary.
+### `useSyncExternalStore` for Client Storage
+`ThemeContext` and `RecentlyViewedContext` read `localStorage` and `matchMedia` via `useSyncExternalStore` with explicit server snapshots (`"system"` and `"[]"`). This avoids hydration warnings and avoids calling `setState` inside `useEffect`.
 
 ---
 
-## 3. Full-Stack Persistence & Security Awareness
+## 3. Sessions, Validation, and Persistence
 
-- **Signed HTTP-Only Cookies (`src/server/session.ts`)**: Authentication sessions are signed using Node's `crypto.createHmac("sha256")` and verified via constant-time comparison (`crypto.timingSafeEqual`). Sensitive tokens are never placed in `localStorage`.
-- **Guest-to-User Cart Merging**: Guest sessions track carts via an anonymous HTTP-only cookie (`veloce_cart_id`). Signing in merges guest cart items into the authenticated user's cart automatically.
-- **Server-Authoritative Checkout (`POST /api/orders`)**: The client submits only shipping details, payment method, and optional coupon code. The server loads cart items, looks up authoritative catalog prices, validates stock caps, and computes the final total using `calculatePricing()`.
-- **Zero-Config Persistence (`src/server/store.ts`)**: Persists to `data/store.json` with serialized async writes during local development, while gracefully falling back to in-memory storage on read-only serverless runtimes (such as Vercel).
+- **HMAC-Signed Cookies (`src/server/session.ts`)**: Sessions are stored in an HTTP-only cookie (`veloce_session`) containing a base64url JSON payload (`{ userId, iat }`) and an HMAC-SHA256 signature verified with `crypto.timingSafeEqual`. Tokens older than 7 days (`SESSION_MAX_AGE_MS`) are rejected on the server. When `NODE_ENV === "production"`, missing or short `SESSION_SECRET` values throw instead of falling back to a default key.
+- **Guest Cart Merge (`POST /api/auth/login`)**: Unauthenticated visitors receive an anonymous HTTP-only `veloce_cart_id` cookie. When they sign in, any guest items are merged into `user:<id>` respecting stock limits, and the guest cart is cleared.
+- **Authoritative Checkout (`POST /api/orders`)**: Validates shipping details with Zod, loads the user's server-side cart, looks up catalog prices on the server, recalculates discounts/shipping via `calculatePricing()`, saves the order, and clears the cart.
+- **Reset Endpoint (`POST /api/demo/reset`)**: Requires a valid session cookie and only clears the signed-in user's own cart, orders, and profile defaults.
+- **Storage Drivers (`src/server/store.ts`)**:
+  - **Upstash Redis / Vercel KV REST (`UpstashRestDriver`)**: Activated automatically when `UPSTASH_REDIS_REST_URL` + `UPSTASH_REDIS_REST_TOKEN` (or `KV_REST_API_URL` + `KV_REST_API_TOKEN`) are configured. Uses separate keys per cart/user and atomic `LPUSH` for orders so concurrent serverless invocations do not overwrite each other.
+  - **Local JSON File (`LocalFileDriver`)**: Default for local development and unit tests, guarded by an in-process async mutex around read-modify-write operations.
 
 ---
 
-## 4. Zero-FOUC Theme Engine
+## 4. Theme Flash Prevention
 
-`ThemeContext` supports `light`, `dark`, and `system` modes persisted in `localStorage` (validated with Zod on read). A small synchronous inline script in `src/app/layout.tsx` applies `.dark` to `<html>` before first paint so page refreshes never flicker between themes.
+In `src/app/layout.tsx`, a small inline script reads `veloce:theme` from `localStorage` and sets `.dark` on `<html>` before first paint so dark-mode users do not see a white flash on hard reload.
