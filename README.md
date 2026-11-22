@@ -2,71 +2,60 @@
 
 [![CI](https://github.com/nathangrazo/veloce-commerce-nextjs/actions/workflows/ci.yml/badge.svg)](https://github.com/nathangrazo/veloce-commerce-nextjs/actions/workflows/ci.yml)
 
-A full-stack e-commerce app built with **Next.js 16 (App Router)**, **React 19**, **TypeScript**, and **Tailwind CSS 4**.
+E-commerce full-stack feito com Next.js 16 (App Router), React 19, TypeScript e Tailwind CSS 4.
 
-It started as a web re-interpretation of a React Native Context API storefront and grew into a study on how far you can take native React state management (`Context` + `useReducer` + `useSyncExternalStore`) alongside Next.js Route Handlers before reaching for heavier client state libraries.
+Comecei como uma versão web de uma loja que eu tinha feito em React Native com Context API, e acabou virando um estudo de até onde dá pra ir só com o estado nativo do React (`Context` + `useReducer` + `useSyncExternalStore`) junto com Route Handlers do Next, sem Redux/Zustand.
 
-> **Live Demo:** _Add your Vercel URL here after deploying (see [Deployment](#deploying-to-vercel) below)._
-
----
-
-## Preview
-
-| Light Mode Storefront | Dark Mode & Cart Drawer |
+| Tema claro | Tema escuro + carrinho |
 | :---: | :---: |
-| ![Storefront Light Mode](docs/screenshots/storefront-light.png) | ![Storefront Dark Mode](docs/screenshots/storefront-dark.png) |
+| ![Vitrine tema claro](docs/screenshots/storefront-light.png) | ![Vitrine tema escuro](docs/screenshots/storefront-dark.png) |
 
----
+## Funcionalidades
 
-## What It Covers
+- **Vitrine** (`/`): filtro por categoria, busca, ordenação e lista de vistos recentemente
+- **Produto** (`/products/[slug]`): páginas geradas estaticamente com `generateStaticParams`
+- **Carrinho** (drawer + `/cart`): updates otimistas, barra de frete grátis (acima de $250) e cupons
+- **Login** (`/login`): cookie de sessão HTTP-only assinado; o carrinho de visitante é mesclado ao logar
+- **Checkout e pedidos** (`/checkout`, `/orders`): formulário validado com Zod e preço recalculado no servidor
+- **Configurações** (`/settings`): tema light/dark/system, perfil de entrega e reset dos dados da conta
 
-- **Storefront (`/`)**: Category filters, search, sorting, recently viewed strip, and an 8-item catalog.
-- **Product Pages (`/products/[slug]`)**: Statically generated product routes (`generateStaticParams`) with specs, quantity controls, and related items.
-- **Shopping Cart (Drawer + `/cart`)**: Optimistic add/update/remove, free-shipping progress bar ($250 threshold), and promo codes (`WELCOME10`, `FREESHIP`).
-- **Authentication (`/login`)**: Signed HTTP-only session cookie with server-side expiration and automatic merge of the guest cart on sign-in.
-- **Checkout (`/checkout`) & Order History (`/orders`)**: Zod-validated shipping form, server-side price recalculation, and persisted order receipts.
-- **Settings (`/settings`)**: `light` / `dark` / `system` theme picker, editable shipping profile, and authenticated account data reset.
+## Algumas decisões
 
----
+**Contextos separados no carrinho.** Estado (`CartStateContext`) e ações (`CartActionsContext`) ficam em contextos diferentes. O `ProductCard` só usa as ações, então adicionar um item não re-renderiza a grid inteira.
 
-## Notable Engineering Choices
+**Fila de mutações otimistas.** A primeira versão fazia o clássico: snapshot antes do request e rollback no `catch`. Isso quebra quando duas ações se sobrepõem e a primeira falha depois da segunda dar certo (o rollback apaga a segunda). Agora as mutações passam por uma fila FIFO com um contador de revisão, e só reconcilio com `GET /api/cart` quando a fila esvazia. Tem teste cobrindo esse caso em `CartContext.test.tsx`.
 
-- **Split Contexts for the Cart (`src/contexts/CartContext.tsx`)**: State (`CartStateContext`) and mutations (`CartActionsContext`) live in separate contexts so `ProductCard` components only subscribe to stable callbacks and do not re-render when cart quantities or totals change.
-- **Queued Optimistic Mutations (`src/contexts/CartContext.tsx`)**: A naive optimistic rollback saves a snapshot before each request and restores it on error — which causes a race condition if two rapid actions overlap and the first one fails after the second succeeds. To avoid that, cart mutations run through a FIFO promise queue tracked by a monotonic revision counter; if an earlier request fails while a newer one is queued, it never rolls back over the newer mutation, and only reconciles with `GET /api/cart` when the queue drains.
-- **External Store Sync (`ThemeContext`, `RecentlyViewedContext`)**: Uses React's `useSyncExternalStore` with explicit server snapshots instead of calling `setState` inside `useEffect`, avoiding hydration mismatches and complying with React 19's strict lint rules.
-- **Signed Cookies with Expiry (`src/server/session.ts`)**: Session cookies are signed with HMAC-SHA256 (`crypto.timingSafeEqual`) and checked against a 7-day `iat` TTL on every request. In production, the app throws if `SESSION_SECRET` is missing or shorter than 16 characters.
-- **Server-Side Pricing (`src/domain/pricing.ts` + `POST /api/orders`)**: The client preview and the order endpoint share the same pure pricing function. The client never sends prices or totals to the API.
-- **Pluggable Persistence (`src/server/store.ts`)**: Uses Upstash Redis / Vercel KV REST (`LPUSH` for orders, per-key JSON for carts and profiles) when environment variables are present, and falls back to a mutex-locked local JSON file (`./data/store.json`) for zero-setup local development.
+**`useSyncExternalStore` pra tema e vistos recentemente.** Evita `setState` dentro de `useEffect` e os warnings de hydration.
 
-More detail on each decision is in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
+**Sessão assinada.** Cookie com HMAC-SHA256 (`timingSafeEqual`) e TTL de 7 dias checado no servidor. Em produção a app não sobe sem `SESSION_SECRET`.
 
----
+**Preço calculado no servidor.** O preview do carrinho e o `POST /api/orders` usam a mesma função pura (`src/domain/pricing.ts`). O cliente nunca manda preço pra API.
 
-## Trade-offs & What I Would Change in Production
+**Persistência plugável.** Com as variáveis do Upstash configuradas usa Redis via REST; sem elas, cai num JSON local (`./data/store.json`) com mutex, o que facilita rodar sem setup nenhum.
 
-This is a **production-minded portfolio project**, not a real storefront taking payments. Being explicit about the boundaries:
+Mais detalhes em [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md).
 
-1. **Single Demo Account vs. Real Auth**: Authentication uses one hardcoded demo user (`demo@veloce.store` / `veloce123`) so reviewers can sign in with one click. In production, I would replace this with a real user table (Argon2/bcrypt password hashes or OAuth via Auth.js/Clerk), refresh token rotation, and per-user rate limiting.
-2. **Storage Layer**: Locally, data lives in `./data/store.json` behind an in-process async mutex. That does not scale across multiple server processes. For Vercel deploys, configure Upstash Redis (`UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN`); for a real store with relational queries and inventory locking, I would move to Postgres (Prisma/Drizzle) with transactional stock decrements.
-3. **Simulated Payments**: Checkout records orders directly without calling a payment gateway. In production, this would use Stripe PaymentIntents, server-verified webhooks, and idempotency keys to prevent duplicate charges.
-4. **Catalog Source**: Products are typed static data in `src/server/data/products.ts` to keep the demo self-contained. A real store would load inventory from a database or headless CMS with cache revalidation (`revalidateTag`).
+## Limitações
 
----
+É um projeto de estudo, não uma loja de verdade:
 
-## Demo Credentials & Promo Codes
+- Só existe um usuário demo fixo. Num cenário real teria tabela de usuários com hash (Argon2/bcrypt) ou OAuth.
+- O JSON local não escala com mais de um processo. Na Vercel use o Upstash; pra estoque de verdade eu iria de Postgres.
+- Não tem gateway de pagamento, o checkout só grava o pedido.
+- O catálogo é estático em `src/server/data/products.ts`.
 
-| Purpose | Value |
+## Conta demo e cupons
+
+| | |
 | :--- | :--- |
-| **Email** | `demo@veloce.store` |
-| **Password** | `veloce123` |
-| **10% Discount** | `WELCOME10` |
-| **Free Shipping** | `FREESHIP` |
+| Email | `demo@veloce.store` |
+| Senha | `veloce123` |
+| 10% de desconto | `WELCOME10` |
+| Frete grátis | `FREESHIP` |
 
----
+## Rodando localmente
 
-## Running Locally
-
-Requires **Node.js 20+** and **npm 10+**.
+Node 20+.
 
 ```bash
 git clone https://github.com/nathangrazo/veloce-commerce-nextjs.git
@@ -76,53 +65,36 @@ cp .env.example .env.local
 npm run dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000).
-
-### Available Scripts
-
-| Command | Purpose |
+| Script | |
 | :--- | :--- |
-| `npm run dev` | Start Next.js dev server (Turbopack) |
-| `npm run build` | Production build |
-| `npm run start` | Serve production build |
-| `npm run typecheck` | Run `tsc --noEmit` |
-| `npm run lint` | Run ESLint (Next.js Core Web Vitals + React 19 rules) |
-| `npm test` | Run Vitest unit & API route tests |
-| `npm run test:e2e` | Run Playwright end-to-end checkout test |
+| `npm run dev` | servidor de desenvolvimento |
+| `npm run build` | build de produção |
+| `npm run typecheck` | `tsc --noEmit` |
+| `npm run lint` | ESLint |
+| `npm test` | testes unitários e de rotas (Vitest) |
+| `npm run test:e2e` | teste E2E do checkout (Playwright) |
 
----
+## Deploy na Vercel
 
-## Deploying to Vercel
+1. Importe o repositório na Vercel
+2. Adicione um `SESSION_SECRET` aleatório (mínimo 16 caracteres)
+3. Conecte a integração do Upstash Redis pra que carrinho e pedidos persistam entre as instâncias serverless
+4. Deploy
 
-1. Import this repository at [vercel.com/new](https://vercel.com/new).
-2. Add a strong random `SESSION_SECRET` (at least 16 characters) in **Settings → Environment Variables**.
-3. Connect an **Upstash Redis** integration (from the Vercel Marketplace) so `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are injected automatically — this ensures carts and orders persist reliably across serverless instances.
-4. Deploy.
-
----
-
-## Project Layout
+## Estrutura
 
 ```text
-├── .github/workflows/ci.yml      # Typecheck, lint, Vitest, build, and Playwright E2E
-├── docs/
-│   ├── ARCHITECTURE.md           # Design notes and trade-offs
-│   └── screenshots/              # App screenshots
-├── e2e/                          # Playwright end-to-end specs
-├── public/images/products/       # Local product photos
-└── src/
-    ├── app/                      # Next.js App Router pages and API route handlers
-    ├── components/               # Reusable UI controls and layout shell
-    ├── contexts/                 # Theme, Toast, Auth, Cart, RecentlyViewed contexts
-    ├── domain/                   # Shared types, Zod schemas, and pricing rules
-    ├── features/                 # Feature-scoped UI modules
-    ├── lib/                      # Storage, formatting, and className helpers
-    ├── server/                   # Catalog data, HMAC sessions, and store drivers
-    └── services/                 # Typed fetch wrappers for client code
+src/
+├── app/         # páginas e route handlers
+├── components/  # UI base e layout
+├── contexts/    # Theme, Toast, Auth, Cart, RecentlyViewed
+├── domain/      # tipos, schemas Zod e regras de preço
+├── features/    # telas por domínio
+├── lib/         # helpers
+├── server/      # catálogo, sessão e drivers de persistência
+└── services/    # wrappers de fetch tipados
 ```
 
----
-
-## License
+## Licença
 
 MIT
